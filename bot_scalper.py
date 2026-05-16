@@ -4,9 +4,9 @@ import requests
 import os
 
 # --- CONFIG GITHUB SECRETS ---
-# --- CONFIG GITHUB SECRETS ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
 # Daftar 30 Koin Crypto Utama
 WATCHLIST = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
@@ -17,20 +17,17 @@ WATCHLIST = [
     "LDOUSDT", "STXUSDT", "DOGEUSDT", "SHIBUSDT", "PEPEUSDT"
 ]
 
-# Definisi 3 Alignment Sesuai Request di Awal
-ALIGNMENTS = [
-    {"htf": "1h", "ltf": "15m", "nama": "1H - 15M (Scalping)"},
-    {"htf": "4h", "ltf": "1h",  "nama": "4H - 1H (Intraday)"},
-    {"htf": "1d", "ltf": "4h",  "nama": "Daily - 4H (Swing)"}
+STRUKTUR_SETUP = [
+    {"bias_tf": "1h", "crt_tf": "15m", "cisd_tf": "1m",  "nama": "1H-15M-1M (Scalping)"},
+    {"bias_tf": "4h", "crt_tf": "1h",  "cisd_tf": "5m",  "nama": "4H-1H-5M (Intraday)"},
+    {"bias_tf": "1d", "crt_tf": "4h",  "cisd_tf": "15m", "nama": "Daily-4H-15M (Swing)"}
 ]
 
 def kirim_notifikasi_telegram(pesan):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": pesan, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print("Error kirim telegram:", e)
+    try: requests.post(url, json=payload)
+    except Exception as e: print("Error kirim telegram:", e)
 
 def get_binance_data(symbol, interval, limit=100):
     url = f"https://api.binance.com/api/v3/klines"
@@ -43,127 +40,130 @@ def get_binance_data(symbol, interval, limit=100):
             'close_time', 'quote_asset_volume', 'number_of_trades',
             'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
         ])
-        float_cols = ['open', 'high', 'low', 'close', 'volume']
-        df[float_cols] = df[float_cols].astype(float)
+        for col in ['open', 'high', 'low', 'close']:
+            df[col] = df[col].astype(float)
         return df
     except Exception as e:
-        print(f"Gagal ambil data {symbol} {interval}: {e}")
         return pd.DataFrame()
 
-def hitung_bias_ict(df):
-    """Menentukan Bias pada HTF (Candle Swept atau Body Break)"""
-    if df.empty or len(df) < 15: 
-        return "NEUTRAL"
-    
-    prev = df.iloc[-2] # Candle yang baru saja close sah
-    
-    # Range acuan untuk mencari liquidity pool terdekat (15 candle terakhir)
+def hitung_bias_htf(df):
+    """Menentukan Bias HTF sekaligus mengembalikan alasan teknisnya"""
+    if df.empty or len(df) < 15: return "NEUTRAL", ""
+    prev = df.iloc[-2]
     highest_range = df['high'].iloc[-15:-2].max()
     lowest_range = df['low'].iloc[-15:-2].min()
     
     # 1. Model Candle Swept Liquidity
-    if prev['low'] < lowest_range and prev['close'] > lowest_range:
-        return "BULLISH"
-    if prev['high'] > highest_range and prev['close'] < highest_high:
-        return "BEARISH"
+    if prev['low'] < lowest_range and prev['close'] > lowest_range: 
+        return "BULLISH", "Liquidity Swept (Mengambil Low lama lalu reject naik)"
+    if prev['high'] > highest_range and prev['close'] < highest_range: 
+        return "BEARISH", "Liquidity Swept (Mengambil High lama lalu reject turun)"
+    
+    # 2. Model Body Break
+    if prev['close'] > highest_range: 
+        return "BULLISH", "Market Structure Shift (Body Break ke atas)"
+    if prev['close'] < lowest_range: 
+        return "BEARISH", "Market Structure Shift (Body Break ke bawah)"
         
-    # 2. Model Body Break (Market Structure Shift)
-    if prev['close'] > highest_range:
-        return "BULLISH"
-    if prev['close'] < lowest_range:
-        return "BEARISH"
-        
-    return "NEUTRAL"
+    return "NEUTRAL", ""
 
-def deteksi_crt_swept_ltf(df, bias):
-    """Logika Candle Range Theory (CRT) / Swept Candle di Timeframe Kanan (LTF)"""
-    if len(df) < 3: 
-        return False
+def cari_cisd_mikro(df_cisd, bias):
+    if df_cisd.empty or len(df_cisd) < 10: return False, 0.0, 0.0
+    last_candle = df_cisd.iloc[-1]
+    swing_high = df_cisd['high'].iloc[-7:-2].max()
+    swing_low = df_cisd['low'].iloc[-7:-2].min()
     
-    current_candle = df.iloc[-1] # Candle LTF berjalan/terbaru yang baru close
-    prev_candle = df.iloc[-2]    # Candle LTF sebelumnya (Range CRT)
-    
-    if bias == "BULLISH":
-        # CRT Bullish: Candle terbaru memanipulasi (Swept) LOW candle sebelumnya, 
-        # lalu close berbalik naik di atas LOW candle sebelumnya tersebut.
-        if current_candle['low'] < prev_candle['low'] and current_candle['close'] > prev_candle['low']:
-            return True
-            
-    elif bias == "BEARISH":
-        # CRT Bearish: Candle terbaru memanipulasi (Swept) HIGH candle sebelumnya, 
-        # lalu close berbalik turun di bawah HIGH candle sebelumnya tersebut.
-        if current_candle['high'] > prev_candle['high'] and current_candle['close'] < prev_candle['high']:
-            return True
-            
-    return False
+    if bias == "BULLISH" and last_candle['close'] > swing_high:
+        return True, last_candle['close'], df_cisd['low'].iloc[-5:].min() * 0.9995
+    elif bias == "BEARISH" and last_candle['close'] < swing_low:
+        return True, last_candle['close'], df_cisd['high'].iloc[-5:].max() * 1.0005
+    return False, 0.0, 0.0
 
-def cek_fvg_atau_swing_ltf(df):
-    """Filter Probabilitas: Mendeteksi apakah CRT bersandar di FVG atau Swing High/Low"""
-    if len(df) < 5: 
-        return False
-        
-    c1 = df.iloc[-3]
-    c3 = df.iloc[-1]
+def cek_fvg_atau_swing_poi(df):
+    """Mengecek POI dan mengembalikan catatan penjelasannya"""
+    if len(df) < 5: return False, "Tidak ada POI kuat (Middle Zone)"
+    c1, c3 = df.iloc[-3], df.iloc[-1]
     
-    # Cari Fair Value Gap (FVG)
     fvg_bullish = c3['low'] > c1['high']
     fvg_bearish = c3['high'] < c1['low']
     
-    # Cari area ekstrem Swing Terdekat (20 candle terakhir)
     lokal_low = df['low'].tail(20).min()
     lokal_high = df['high'].tail(20).max()
-    
-    # Toleransi kedekatan harga (0.15%)
     dekat_swing_low = abs(c3['close'] - lokal_low) / lokal_low < 0.0015
     dekat_swing_high = abs(c3['close'] - lokal_high) / lokal_high < 0.0015
     
-    return fvg_bullish or fvg_bearish or dekat_swing_low or dekat_swing_high
+    if fvg_bullish or fvg_bearish:
+        return True, "Valid Fair Value Gap (FVG Zone)"
+    if dekat_swing_low or dekat_swing_high:
+        return True, "Retest Ekstrem Swing High/Low (ERL)"
+        
+    return False, "Tidak ada POI kuat (Middle Zone)"
 
 def jalankan_bot():
-    print(f"🚀 Memulai Pemindaian Multi-Timeframe ({len(WATCHLIST)} Koin)...")
-    
+    print("🚀 Memulai Scanning dengan Penjelasan Analisa Terperinci...")
     for market in WATCHLIST:
-        for align in ALIGNMENTS:
-            # Mengambil data dinamis sesuai settingan aligment masing-masing
-            df_htf = get_binance_data(market, interval=align["htf"])
-            df_ltf = get_binance_data(market, interval=align["ltf"])
+        for setup in STRUKTUR_SETUP:
+            df_bias = get_binance_data(market, interval=setup["bias_tf"])
+            df_crt = get_binance_data(market, interval=setup["crt_tf"])
             
-            if df_htf.empty or df_ltf.empty: 
-                continue
+            if df_bias.empty or df_crt.empty: continue
                 
-            # 1. Cek Bias HTF (Sisi Kiri)
-            bias_htf = hitung_bias_ict(df_htf)
-            if bias_htf == "NEUTRAL": 
-                continue
+            bias_utama, alasan_bias = hitung_bias_htf(df_bias)
+            if bias_utama == "NEUTRAL": continue
                 
-            # 2. Cek Keselarasan Bias LTF (Sisi Kanan)
-            bias_ltf = hitung_bias_ict(df_ltf)
+            candle_swept = df_crt.iloc[-1]
+            candle_acuan = df_crt.iloc[-2]
             
-            # Aturan: Bias HTF dan LTF harus selaras (Sama-sama Bullish / Bearish)
-            if bias_htf == bias_ltf:
+            crt_valid = False
+            if bias_utama == "BULLISH":
+                if candle_swept['low'] < candle_acuan['low'] and candle_swept['close'] > candle_acuan['low']:
+                    crt_valid = True
+            elif bias_utama == "BEARISH":
+                if candle_swept['high'] > candle_acuan['high'] and candle_swept['close'] < candle_acuan['high']:
+                    crt_valid = True
+                    
+            if crt_valid:
+                df_cisd = get_binance_data(market, interval=setup["cisd_tf"], limit=50)
+                cisd_confirmed, entry_price, sl_price = cari_cisd_mikro(df_cisd, bias_utama)
                 
-                # 3. Cari Apakah ada Pemicu CRT / Swept Candle di LTF
-                if deteksi_crt_swept_ltf(df_ltf, bias_htf):
+                if cisd_confirmed:
+                    # Ambil Alasan Kualitas POI
+                    is_high_prob, alasan_poi = cek_fvg_atau_swing_poi(df_crt)
+                    status_prob = "🔥 HIGH PROBABILITY" if is_high_prob else "⚠️ LOW PROBABILITY"
                     
-                    # 4. Filter High Probability (Jika di dalam FVG / Swing)
-                    is_high_prob = cek_fvg_atau_swing_ltf(df_ltf)
-                    status_prob = "🔥 HIGH PROBABILITY (FVG / Swing Re-test)" if is_high_prob else "⚠️ LOW PROBABILITY (Middle Zone)"
+                    if bias_utama == "BULLISH":
+                        risk = entry_price - sl_price
+                        tp_price = entry_price + (risk * 2)
+                    else:
+                        risk = sl_price - entry_price
+                        tp_price = entry_price - (risk * 2)
+                        
+                    desimal = 4 if entry_price < 10 else (2 if entry_price < 1000 else 1)
                     
-                    # Kirim Sinyal Spesifik ke Telegram
+                    # FORMAT PESAN DENGAN MATRIKS PENJELASAN (DIREVISI)
                     pesan = (
-                        f"🎯 *CANDLE RANGE THEORY (CRT) SIGNAL* 🎯\n"
+                        f"⚡ *FRAKTAL CRT SIGNAL DETECTED* ⚡\n"
                         f"━━━━━━━━━━━━━━━━━━━━\n"
                         f"🪙 *Asset:* #{market}\n"
-                        f"📐 *Alignment:* {align['nama']}\n"
-                        f"📈 *Daily Bias:* {bias_htf}\n"
-                        f"🌀 *Trigger:* Swept Candle CRT Valid\n"
-                        f"🛡️ *Klasifikasi:* {status_prob}\n"
+                        f"📐 *Model:* {setup['nama']}\n"
+                        f"📈 *{setup['bias_tf'].upper()} Bias:* {bias_utama}\n"
                         f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"⏰ *Waktu:* {datetime.datetime.utcnow().strftime('%H:%M')} UTC"
+                        f"📖 *PENJELASAN ANALISA (MARKET CONTEXT):*\n"
+                        f"• *Pemicu Bias:* {alasan_bias}\n"
+                        f"• *Trigger CRT:* Valid Swept Candle pada TF {setup['crt_tf'].upper()}\n"
+                        f"• *Area Kedudukan:* {alasan_poi} ({status_prob})\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🎯 *PRESET ORDER DATA (SET & FORGET):*\n\n"
+                        f"🟢 *ENTRY PRICE :* `{entry_price:.{desimal}f}`\n"
+                        f"🔴 *STOP LOSS (SL):* `{sl_price:.{desimal}f}` *(Swing {setup['cisd_tf'].upper()})*\n"
+                        f"🔵 *TAKE PROFIT (TP):* `{tp_price:.{desimal}f}` *(RR 1:2 Min)*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"💡 *Info:* Konfirmasi patah struktur (CISD) di TF {setup['cisd_tf'].upper()} sah. Silakan pasang order.\n"
+                        f"⏰ *Waktu Server:* {datetime.datetime.utcnow().strftime('%H:%M')} UTC"
                     )
                     kirim_notifikasi_telegram(pesan)
                     
-    print("✅ Semua koin dan semua pasangan TF selesai di-scan.")
+    print("✅ Scanning selesai.")
 
 if __name__ == "__main__":
     jalankan_bot()
