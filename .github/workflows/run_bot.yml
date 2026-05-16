@@ -2,9 +2,8 @@ name: CRT Bias Scalper Bot
 
 on:
   schedule:
-    # Mengatur bot berjalan otomatis setiap 15 menit (mengikuti penutupan candle 15M)
     - cron: '*/15 * * * *'
-  workflow_dispatch: # Membuat tombol manual di GitHub untuk tes bot kapan saja
+  workflow_dispatch:
 
 jobs:
   run-bot:
